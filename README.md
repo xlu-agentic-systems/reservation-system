@@ -7,6 +7,7 @@ Restaurant reservation system with a shared Python backend for online bookings a
 - FastAPI backend with SQLite persistence.
 - Shared reservation service for phone-agent and online reservations.
 - Table-aware availability planner that assigns reservations to tables or combinable table groups for a full turn duration.
+- Plugin-style restaurant layout import with dry-run validation and replace/upsert modes.
 - LLM-backed call interaction endpoint with a deterministic parser fallback.
 - Expo React Native app for availability, online bookings, reservation list, and call-agent simulation.
 - Unit tests for the reservation consistency rules and agent parser.
@@ -39,6 +40,8 @@ Set `EXPO_PUBLIC_API_BASE_URL` if the backend is not running on `http://localhos
 
 - `GET /health`
 - `GET /availability?date=2026-05-10&party_size=2`
+- `GET /tables`
+- `POST /inventory/import`
 - `POST /reservations`
 - `GET /reservations?date=2026-05-10`
 - `PATCH /reservations/{reservation_id}/status`
