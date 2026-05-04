@@ -1,6 +1,7 @@
 import { AvailabilitySlot, CallAgentResponse, Reservation } from "../types/reservation";
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const ADMIN_API_KEY = process.env.EXPO_PUBLIC_ADMIN_API_KEY;
 
 type ReservationInput = {
   guest_name: string;
@@ -11,10 +12,14 @@ type ReservationInput = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(ADMIN_API_KEY ? { "x-api-key": ADMIN_API_KEY } : {})
+  };
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...headers,
       ...(init?.headers ?? {})
     }
   });
