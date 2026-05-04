@@ -24,6 +24,7 @@ export function ReservationList({ reservations }: Props) {
               <Text style={styles.meta}>
                 {formatTime(reservation.reservation_time)} · Party {reservation.party_size} · {reservation.channel}
               </Text>
+              <Text style={styles.table}>{reservation.table_names.join("+") || "Unassigned"}</Text>
             </View>
             <Text style={styles.status}>{reservation.status}</Text>
           </View>
@@ -73,6 +74,11 @@ const styles = StyleSheet.create({
   meta: {
     color: "#60746f",
     fontSize: 13,
+    marginTop: 3
+  },
+  table: {
+    color: "#60746f",
+    fontSize: 12,
     marginTop: 3
   },
   status: {

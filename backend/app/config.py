@@ -28,6 +28,7 @@ class Settings:
     close_time: str
     slot_minutes: int
     slot_capacity: int
+    default_duration_minutes: int
     openai_api_key: str | None
     openai_model: str
 
@@ -44,6 +45,7 @@ def get_settings() -> Settings:
         close_time=os.getenv("RESTAURANT_CLOSE_TIME", "22:00"),
         slot_minutes=int(os.getenv("RESERVATION_SLOT_MINUTES", "15")),
         slot_capacity=int(os.getenv("RESERVATION_SLOT_CAPACITY", "30")),
+        default_duration_minutes=int(os.getenv("DEFAULT_RESERVATION_DURATION_MINUTES", "90")),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
     )

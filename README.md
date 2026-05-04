@@ -6,7 +6,7 @@ Restaurant reservation system with a shared Python backend for online bookings a
 
 - FastAPI backend with SQLite persistence.
 - Shared reservation service for phone-agent and online reservations.
-- Availability endpoint that prevents overbooking per time slot.
+- Table-aware availability planner that assigns reservations to tables or combinable table groups for a full turn duration.
 - LLM-backed call interaction endpoint with a deterministic parser fallback.
 - Expo React Native app for availability, online bookings, reservation list, and call-agent simulation.
 - Unit tests for the reservation consistency rules and agent parser.
@@ -44,4 +44,4 @@ Set `EXPO_PUBLIC_API_BASE_URL` if the backend is not running on `http://localhos
 - `PATCH /reservations/{reservation_id}/status`
 - `POST /agent/call-turn`
 
-The phone agent and online booking flows both create reservations through the same service, so they see the same availability and capacity constraints.
+The phone agent and online booking flows both create reservations through the same service, so they see the same table inventory, turn-duration, and capacity constraints.

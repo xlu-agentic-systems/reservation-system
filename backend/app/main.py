@@ -28,6 +28,7 @@ service = ReservationService(
     close_time=settings.close_time,
     slot_minutes=settings.slot_minutes,
     slot_capacity=settings.slot_capacity,
+    default_duration_minutes=settings.default_duration_minutes,
 )
 parser = (
     OpenAIIntentParser(api_key=settings.openai_api_key, model=settings.openai_model)
@@ -51,6 +52,7 @@ class ReservationCreateBody(BaseModel):
     phone: str = Field(min_length=1)
     party_size: int = Field(gt=0)
     reservation_time: str
+    duration_minutes: int | None = Field(default=None, gt=0)
     channel: str = "online"
     notes: str = ""
 
@@ -95,6 +97,7 @@ def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
                 phone=body.phone,
                 party_size=body.party_size,
                 reservation_time=body.reservation_time,
+                duration_minutes=body.duration_minutes,
                 channel=body.channel,
                 notes=body.notes,
             )
