@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+from datetime import date
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from .config import get_settings
+from .llm_agent import DeterministicIntentParser, OpenAIIntentParser, ReservationCallAgent
+from .reservations import (
+    ReservationCreate,
+    ReservationError,
+    ReservationNotAvailableError,
+    ReservationNotFoundError,
+    ReservationService,
+    record_to_dict,
+)
+from .storage import ReservationStore
+
+
+settings = get_settings()
+store = ReservationStore(settings.database_path)
+service = ReservationService(
+    store,
+    timezone_name=settings.timezone,
+    open_time=settings.open_time,
+    close_time=settings.close_time,
+    slot_minutes=settings.slot_minutes,
+    slot_capacity=settings.slot_capacity,
+)
+parser = (
+    OpenAIIntentParser(api_key=settings.openai_api_key, model=settings.openai_model)
+    if settings.openai_api_key
+    else DeterministicIntentParser()
+)
+call_agent = ReservationCallAgent(service, parser)
+
+app = FastAPI(title="Restaurant Reservation System")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ReservationCreateBody(BaseModel):
+    guest_name: str = Field(min_length=1)
+    phone: str = Field(min_length=1)
+    party_size: int = Field(gt=0)
+    reservation_time: str
+    channel: str = "online"
+    notes: str = ""
+
+
+class ReservationStatusBody(BaseModel):
+    status: str
+
+
+class CallTurnBody(BaseModel):
+    session_id: str = Field(min_length=1)
+    utterance: str = Field(min_length=1)
+    caller_phone: str | None = None
+
+
+@app.get("/health")
+def health() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "restaurant": settings.restaurant_name,
+        "llm_enabled": bool(settings.openai_api_key),
+    }
+
+
+@app.get("/availability")
+def availability(
+    date_value: date = Query(alias="date"),
+    party_size: int = Query(default=1, gt=0),
+) -> dict[str, object]:
+    try:
+        slots = service.availability(date_value, party_size=party_size)
+    except ReservationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"date": date_value.isoformat(), "slots": [slot.__dict__ for slot in slots]}
+
+
+@app.post("/reservations", status_code=201)
+def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
+    try:
+        record = service.create_reservation(
+            ReservationCreate(
+                guest_name=body.guest_name,
+                phone=body.phone,
+                party_size=body.party_size,
+                reservation_time=body.reservation_time,
+                channel=body.channel,
+                notes=body.notes,
+            )
+        )
+    except ReservationNotAvailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReservationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return record_to_dict(record)
+
+
+@app.get("/reservations")
+def list_reservations(date_value: date | None = Query(default=None, alias="date")) -> dict[str, object]:
+    records = service.list_reservations(date_value)
+    return {"reservations": [record_to_dict(record) for record in records]}
+
+
+@app.patch("/reservations/{reservation_id}/status")
+def update_reservation_status(reservation_id: str, body: ReservationStatusBody) -> dict[str, object]:
+    try:
+        record = service.update_status(reservation_id, body.status)
+    except ReservationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ReservationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return record_to_dict(record)
+
+
+@app.post("/agent/call-turn")
+async def call_turn(body: CallTurnBody) -> dict[str, object]:
+    return await call_agent.handle_turn(
+        session_id=body.session_id,
+        utterance=body.utterance,
+        caller_phone=body.caller_phone,
+    )
