@@ -29,6 +29,8 @@ class Settings:
     slot_minutes: int
     slot_capacity: int
     default_duration_minutes: int
+    admin_api_key: str | None
+    allowed_cors_origins: tuple[str, ...]
     openai_api_key: str | None
     openai_model: str
 
@@ -46,6 +48,12 @@ def get_settings() -> Settings:
         slot_minutes=int(os.getenv("RESERVATION_SLOT_MINUTES", "15")),
         slot_capacity=int(os.getenv("RESERVATION_SLOT_CAPACITY", "30")),
         default_duration_minutes=int(os.getenv("DEFAULT_RESERVATION_DURATION_MINUTES", "90")),
+        admin_api_key=os.getenv("ADMIN_API_KEY") or None,
+        allowed_cors_origins=parse_csv(os.getenv("ALLOWED_CORS_ORIGINS", "http://localhost:8081,http://localhost:19006")),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
     )
+
+
+def parse_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())

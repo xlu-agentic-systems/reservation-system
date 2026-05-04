@@ -197,6 +197,18 @@ class ReservationStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def ensure_column(self, connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")}
@@ -640,6 +652,21 @@ class ReservationStore:
                 """,
                 (str(uuid4()), session_id, role, text, action, utc_now()),
             )
+
+    def append_audit_event(self, *, actor: str, action: str, target_type: str, target_id: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_events (id, actor, action, target_type, target_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid4()), actor, action, target_type, target_id, utc_now()),
+            )
+
+    def audit_event_count(self) -> int:
+        with self.connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM audit_events").fetchone()
+        return int(row["count"])
 
 
 def utc_now() -> str:

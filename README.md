@@ -35,6 +35,7 @@ npm start
 ```
 
 Set `EXPO_PUBLIC_API_BASE_URL` if the backend is not running on `http://localhost:8000`.
+Set `EXPO_PUBLIC_ADMIN_API_KEY` for host/admin workflows that list or update reservations.
 
 ## API Summary
 
@@ -48,3 +49,5 @@ Set `EXPO_PUBLIC_API_BASE_URL` if the backend is not running on `http://localhos
 - `POST /agent/call-turn`
 
 The phone agent and online booking flows both create reservations through the same service, so they see the same table inventory, turn-duration, and capacity constraints.
+
+Host/admin endpoints require `x-api-key` when `ADMIN_API_KEY` is configured.

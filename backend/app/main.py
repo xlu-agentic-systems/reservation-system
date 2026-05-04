@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from .reservations import (
     ReservationUpdate,
     record_to_dict,
 )
+from .security import audit_request, require_admin_api_key
 from .storage import ReservationStore
 
 
@@ -43,11 +44,15 @@ call_agent = ReservationCallAgent(service, parser)
 app = FastAPI(title="Restaurant Reservation System")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.allowed_cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def require_admin(request: Request) -> None:
+    require_admin_api_key(settings, request)
 
 
 class ReservationCreateBody(BaseModel):
@@ -98,10 +103,16 @@ class CallTurnBody(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    try:
+        table_count = len(store.list_tables())
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
     return {
         "status": "ok",
         "restaurant": settings.restaurant_name,
         "llm_enabled": bool(settings.openai_api_key),
+        "admin_auth_configured": bool(settings.admin_api_key),
+        "table_count": table_count,
     }
 
 
@@ -118,12 +129,16 @@ def availability(
 
 
 @app.get("/tables")
-def list_tables() -> dict[str, object]:
+def list_tables(_: None = Depends(require_admin)) -> dict[str, object]:
     return {"tables": [table_to_dict(table) for table in store.list_tables(include_inactive=True)]}
 
 
 @app.post("/inventory/import")
-def import_inventory(body: LayoutImportBody) -> dict[str, object]:
+def import_inventory(
+    body: LayoutImportBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
     specs = [
         TableSpec(
             id=table.id,
@@ -144,6 +159,7 @@ def import_inventory(body: LayoutImportBody) -> dict[str, object]:
     )
     if result.errors:
         raise HTTPException(status_code=400, detail=list(result.errors))
+    audit_request(store, request, action="inventory.import", target_type="inventory")
     return {
         "mode": result.mode,
         "dry_run": result.dry_run,
@@ -154,7 +170,7 @@ def import_inventory(body: LayoutImportBody) -> dict[str, object]:
 
 
 @app.post("/reservations", status_code=201)
-def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
+def create_reservation(body: ReservationCreateBody, request: Request) -> dict[str, object]:
     try:
         record = service.create_reservation(
             ReservationCreate(
@@ -171,6 +187,7 @@ def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ReservationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_request(store, request, action="reservation.create", target_type="reservation", target_id=record.id)
     return record_to_dict(record)
 
 
@@ -178,13 +195,17 @@ def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
 def list_reservations(
     date_value: date | None = Query(default=None, alias="date"),
     query: str | None = None,
+    _: None = Depends(require_admin),
 ) -> dict[str, object]:
     records = service.list_reservations(date_value, query=query)
     return {"reservations": [record_to_dict(record) for record in records]}
 
 
 @app.get("/reservations/{reservation_id}")
-def get_reservation(reservation_id: str) -> dict[str, object]:
+def get_reservation(
+    reservation_id: str,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
     try:
         record = service.get_reservation(reservation_id)
     except ReservationNotFoundError as exc:
@@ -193,7 +214,12 @@ def get_reservation(reservation_id: str) -> dict[str, object]:
 
 
 @app.patch("/reservations/{reservation_id}")
-def update_reservation(reservation_id: str, body: ReservationUpdateBody) -> dict[str, object]:
+def update_reservation(
+    reservation_id: str,
+    body: ReservationUpdateBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
     try:
         record = service.update_reservation(
             reservation_id,
@@ -212,11 +238,17 @@ def update_reservation(reservation_id: str, body: ReservationUpdateBody) -> dict
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ReservationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_request(store, request, action="reservation.update", target_type="reservation", target_id=record.id)
     return record_to_dict(record)
 
 
 @app.patch("/reservations/{reservation_id}/status")
-def update_reservation_status(reservation_id: str, body: ReservationStatusBody) -> dict[str, object]:
+def update_reservation_status(
+    reservation_id: str,
+    body: ReservationStatusBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict[str, object]:
     try:
         record = service.update_status(reservation_id, body.status)
     except ReservationNotAvailableError as exc:
@@ -225,6 +257,7 @@ def update_reservation_status(reservation_id: str, body: ReservationStatusBody) 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ReservationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_request(store, request, action=f"reservation.status.{body.status}", target_type="reservation", target_id=record.id)
     return record_to_dict(record)
 
 
