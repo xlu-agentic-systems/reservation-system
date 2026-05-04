@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Protocol
 from uuid import uuid4
 
 
@@ -43,6 +43,17 @@ class RestaurantTableRecord:
     is_active: bool
     created_at: str
     updated_at: str
+
+
+class TableImportSpec(Protocol):
+    id: str
+    name: str
+    capacity: int
+    zone: str
+    x: float
+    y: float
+    can_combine: bool
+    is_active: bool
 
 
 class ReservationStore:
@@ -189,6 +200,50 @@ class ReservationStore:
             raise RuntimeError("Table was not persisted")
         return record
 
+    def import_tables(self, tables: tuple[TableImportSpec, ...], *, replace: bool) -> None:
+        now = utc_now()
+        incoming_ids = {table.id for table in tables}
+        with self.connect() as connection:
+            if replace:
+                connection.execute(
+                    f"""
+                    UPDATE restaurant_tables
+                    SET is_active = 0, updated_at = ?
+                    WHERE id NOT IN ({", ".join("?" for _ in incoming_ids)})
+                    """,
+                    [now, *sorted(incoming_ids)],
+                )
+            for table in tables:
+                connection.execute(
+                    """
+                    INSERT INTO restaurant_tables (
+                        id, name, capacity, zone, x, y, can_combine, is_active, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        capacity = excluded.capacity,
+                        zone = excluded.zone,
+                        x = excluded.x,
+                        y = excluded.y,
+                        can_combine = excluded.can_combine,
+                        is_active = excluded.is_active,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        table.id,
+                        table.name,
+                        table.capacity,
+                        table.zone,
+                        table.x,
+                        table.y,
+                        int(table.can_combine),
+                        int(table.is_active),
+                        now,
+                        now,
+                    ),
+                )
+
     def get_table(self, table_id: str) -> RestaurantTableRecord | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM restaurant_tables WHERE id = ?", (table_id,)).fetchone()
@@ -199,6 +254,20 @@ class ReservationStore:
         with self.connect() as connection:
             rows = connection.execute(f"SELECT * FROM restaurant_tables {where} ORDER BY zone, name").fetchall()
         return [to_table_record(row) for row in rows]
+
+    def active_assignment_table_ids(self) -> set[str]:
+        placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT reservation_table_assignments.table_id
+                FROM reservation_table_assignments
+                JOIN reservations ON reservations.id = reservation_table_assignments.reservation_id
+                WHERE reservations.status IN ({placeholders})
+                """,
+                sorted(ACTIVE_STATUSES),
+            ).fetchall()
+        return {row["table_id"] for row in rows}
 
     def create(
         self,

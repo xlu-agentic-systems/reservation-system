@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config import get_settings
+from .layout_import import LayoutImportService, StaticLayoutProvider, TableSpec, table_to_dict
 from .llm_agent import DeterministicIntentParser, OpenAIIntentParser, ReservationCallAgent
 from .reservations import (
     ReservationCreate,
@@ -21,6 +22,7 @@ from .storage import ReservationStore
 
 settings = get_settings()
 store = ReservationStore(settings.database_path)
+layout_import_service = LayoutImportService(store)
 service = ReservationService(
     store,
     timezone_name=settings.timezone,
@@ -61,6 +63,23 @@ class ReservationStatusBody(BaseModel):
     status: str
 
 
+class TableSpecBody(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    capacity: int = Field(gt=0)
+    zone: str = "Dining Room"
+    x: float = 0
+    y: float = 0
+    can_combine: bool = True
+    is_active: bool = True
+
+
+class LayoutImportBody(BaseModel):
+    mode: str = "upsert"
+    dry_run: bool = True
+    tables: list[TableSpecBody]
+
+
 class CallTurnBody(BaseModel):
     session_id: str = Field(min_length=1)
     utterance: str = Field(min_length=1)
@@ -86,6 +105,42 @@ def availability(
     except ReservationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"date": date_value.isoformat(), "slots": [slot.__dict__ for slot in slots]}
+
+
+@app.get("/tables")
+def list_tables() -> dict[str, object]:
+    return {"tables": [table_to_dict(table) for table in store.list_tables(include_inactive=True)]}
+
+
+@app.post("/inventory/import")
+def import_inventory(body: LayoutImportBody) -> dict[str, object]:
+    specs = [
+        TableSpec(
+            id=table.id,
+            name=table.name,
+            capacity=table.capacity,
+            zone=table.zone,
+            x=table.x,
+            y=table.y,
+            can_combine=table.can_combine,
+            is_active=table.is_active,
+        )
+        for table in body.tables
+    ]
+    result = layout_import_service.import_layout(
+        provider=StaticLayoutProvider(specs),
+        mode=body.mode,
+        dry_run=body.dry_run,
+    )
+    if result.errors:
+        raise HTTPException(status_code=400, detail=list(result.errors))
+    return {
+        "mode": result.mode,
+        "dry_run": result.dry_run,
+        "imported_tables": result.imported_tables,
+        "active_tables_after_import": result.active_tables_after_import,
+        "warnings": list(result.warnings),
+    }
 
 
 @app.post("/reservations", status_code=201)
