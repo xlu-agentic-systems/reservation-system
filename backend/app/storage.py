@@ -19,10 +19,28 @@ class ReservationRecord:
     phone: str
     party_size: int
     reservation_time: str
+    duration_minutes: int
+    ends_at: str
     channel: str
     status: str
     notes: str
     source_session_id: str | None
+    table_ids: tuple[str, ...]
+    table_names: tuple[str, ...]
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class RestaurantTableRecord:
+    id: str
+    name: str
+    capacity: int
+    zone: str
+    x: float
+    y: float
+    can_combine: bool
+    is_active: bool
     created_at: str
     updated_at: str
 
@@ -53,6 +71,8 @@ class ReservationStore:
                     phone TEXT NOT NULL,
                     party_size INTEGER NOT NULL CHECK (party_size > 0),
                     reservation_time TEXT NOT NULL,
+                    duration_minutes INTEGER NOT NULL DEFAULT 90,
+                    ends_at TEXT NOT NULL DEFAULT '',
                     channel TEXT NOT NULL,
                     status TEXT NOT NULL,
                     notes TEXT NOT NULL DEFAULT '',
@@ -62,12 +82,123 @@ class ReservationStore:
                 )
                 """
             )
+            self.ensure_column(connection, "reservations", "duration_minutes", "INTEGER NOT NULL DEFAULT 90")
+            self.ensure_column(connection, "reservations", "ends_at", "TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                """
+                UPDATE reservations
+                SET ends_at = strftime('%Y-%m-%dT%H:%M:%SZ', reservation_time, '+' || duration_minutes || ' minutes')
+                WHERE ends_at = ''
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_reservations_time_status
                 ON reservations (reservation_time, status)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS restaurant_tables (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    capacity INTEGER NOT NULL CHECK (capacity > 0),
+                    zone TEXT NOT NULL DEFAULT 'Dining Room',
+                    x REAL NOT NULL DEFAULT 0,
+                    y REAL NOT NULL DEFAULT 0,
+                    can_combine INTEGER NOT NULL DEFAULT 1,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reservation_table_assignments (
+                    reservation_id TEXT NOT NULL,
+                    table_id TEXT NOT NULL,
+                    PRIMARY KEY (reservation_id, table_id),
+                    FOREIGN KEY (reservation_id) REFERENCES reservations(id),
+                    FOREIGN KEY (table_id) REFERENCES restaurant_tables(id)
+                )
+                """
+            )
+
+    def ensure_column(self, connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")}
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+    def seed_default_tables(self, total_capacity: int) -> None:
+        if self.list_tables(include_inactive=True):
+            return
+        table_sizes: list[int] = []
+        remaining = total_capacity
+        while remaining > 0:
+            capacity = 2 if remaining >= 2 else remaining
+            table_sizes.append(capacity)
+            remaining -= capacity
+        for index, capacity in enumerate(table_sizes, start=1):
+            self.create_table(
+                name=f"T{index}",
+                capacity=capacity,
+                zone="Dining Room",
+                x=float((index - 1) % 5),
+                y=float((index - 1) // 5),
+                can_combine=capacity <= 4,
+            )
+
+    def create_table(
+        self,
+        *,
+        name: str,
+        capacity: int,
+        zone: str = "Dining Room",
+        x: float = 0,
+        y: float = 0,
+        can_combine: bool = True,
+        is_active: bool = True,
+        table_id: str | None = None,
+    ) -> RestaurantTableRecord:
+        now = utc_now()
+        record_id = table_id or str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO restaurant_tables (
+                    id, name, capacity, zone, x, y, can_combine, is_active, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    name,
+                    capacity,
+                    zone,
+                    x,
+                    y,
+                    int(can_combine),
+                    int(is_active),
+                    now,
+                    now,
+                ),
+            )
+        record = self.get_table(record_id)
+        if record is None:
+            raise RuntimeError("Table was not persisted")
+        return record
+
+    def get_table(self, table_id: str) -> RestaurantTableRecord | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM restaurant_tables WHERE id = ?", (table_id,)).fetchone()
+        return to_table_record(row) if row else None
+
+    def list_tables(self, *, include_inactive: bool = False) -> list[RestaurantTableRecord]:
+        where = "" if include_inactive else "WHERE is_active = 1"
+        with self.connect() as connection:
+            rows = connection.execute(f"SELECT * FROM restaurant_tables {where} ORDER BY zone, name").fetchall()
+        return [to_table_record(row) for row in rows]
 
     def create(
         self,
@@ -76,9 +207,12 @@ class ReservationStore:
         phone: str,
         party_size: int,
         reservation_time: str,
+        duration_minutes: int,
+        ends_at: str,
         channel: str,
         notes: str = "",
         source_session_id: str | None = None,
+        table_ids: tuple[str, ...] = (),
     ) -> ReservationRecord:
         now = utc_now()
         record_id = str(uuid4())
@@ -86,10 +220,10 @@ class ReservationStore:
             connection.execute(
                 """
                 INSERT INTO reservations (
-                    id, guest_name, phone, party_size, reservation_time, channel,
+                    id, guest_name, phone, party_size, reservation_time, duration_minutes, ends_at, channel,
                     status, notes, source_session_id, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -97,6 +231,8 @@ class ReservationStore:
                     phone,
                     party_size,
                     reservation_time,
+                    duration_minutes,
+                    ends_at,
                     channel,
                     "confirmed",
                     notes,
@@ -104,6 +240,13 @@ class ReservationStore:
                     now,
                     now,
                 ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO reservation_table_assignments (reservation_id, table_id)
+                VALUES (?, ?)
+                """,
+                [(record_id, table_id) for table_id in table_ids],
             )
         record = self.get(record_id)
         if record is None:
@@ -116,7 +259,7 @@ class ReservationStore:
                 "SELECT * FROM reservations WHERE id = ?",
                 (reservation_id,),
             ).fetchone()
-        return to_record(row) if row else None
+        return to_record(row, self.table_assignments_for_reservation(reservation_id)) if row else None
 
     def list(
         self,
@@ -143,7 +286,37 @@ class ReservationStore:
                 f"SELECT * FROM reservations {where} ORDER BY reservation_time, created_at",
                 params,
             ).fetchall()
-        return [to_record(row) for row in rows]
+        return [to_record(row, self.table_assignments_for_reservation(row["id"])) for row in rows]
+
+    def overlapping_reservations(self, *, start_time: str, end_time: str) -> list[ReservationRecord]:
+        placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM reservations
+                WHERE reservation_time < ?
+                AND ends_at > ?
+                AND status IN ({placeholders})
+                ORDER BY reservation_time
+                """,
+                [end_time, start_time, *sorted(ACTIVE_STATUSES)],
+            ).fetchall()
+        return [to_record(row, self.table_assignments_for_reservation(row["id"])) for row in rows]
+
+    def table_assignments_for_reservation(self, reservation_id: str) -> tuple[tuple[str, str], ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT restaurant_tables.id, restaurant_tables.name
+                FROM reservation_table_assignments
+                JOIN restaurant_tables ON restaurant_tables.id = reservation_table_assignments.table_id
+                WHERE reservation_table_assignments.reservation_id = ?
+                ORDER BY restaurant_tables.name
+                """,
+                (reservation_id,),
+            ).fetchall()
+        return tuple((row["id"], row["name"]) for row in rows)
 
     def seats_reserved_for_slot(self, reservation_time: str) -> int:
         placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
@@ -176,17 +349,36 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def to_record(row: sqlite3.Row) -> ReservationRecord:
+def to_record(row: sqlite3.Row, table_assignments: tuple[tuple[str, str], ...] = ()) -> ReservationRecord:
     return ReservationRecord(
         id=row["id"],
         guest_name=row["guest_name"],
         phone=row["phone"],
         party_size=int(row["party_size"]),
         reservation_time=row["reservation_time"],
+        duration_minutes=int(row["duration_minutes"]),
+        ends_at=row["ends_at"],
         channel=row["channel"],
         status=row["status"],
         notes=row["notes"],
         source_session_id=row["source_session_id"],
+        table_ids=tuple(table_id for table_id, _ in table_assignments),
+        table_names=tuple(table_name for _, table_name in table_assignments),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def to_table_record(row: sqlite3.Row) -> RestaurantTableRecord:
+    return RestaurantTableRecord(
+        id=row["id"],
+        name=row["name"],
+        capacity=int(row["capacity"]),
+        zone=row["zone"],
+        x=float(row["x"]),
+        y=float(row["y"]),
+        can_combine=bool(row["can_combine"]),
+        is_active=bool(row["is_active"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

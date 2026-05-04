@@ -32,6 +32,9 @@ export function AvailabilityStrip({ slots, selectedTime, onSelect }: Props) {
               <Text style={[styles.seats, selected && styles.slotSelectedText]}>
                 {slot.seats_remaining} seats
               </Text>
+              <Text style={[styles.tables, selected && styles.slotSelectedText]}>
+                {slot.table_names.length ? slot.table_names.join("+") : "No table"}
+              </Text>
             </Pressable>
           );
         })}
@@ -90,6 +93,11 @@ const styles = StyleSheet.create({
   seats: {
     color: "#60746f",
     fontSize: 12,
+    marginTop: 2
+  },
+  tables: {
+    color: "#60746f",
+    fontSize: 11,
     marginTop: 2
   }
 });

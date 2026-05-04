@@ -93,8 +93,118 @@ class ReservationServiceTest(unittest.TestCase):
 
         slots = self.service.availability(date(2026, 6, 12), party_size=2)
         slot = next(item for item in slots if item.reservation_time.endswith("22:00:00Z"))
-        self.assertEqual(slot.seats_remaining, 1)
+        self.assertEqual(slot.seats_remaining, 0)
         self.assertFalse(slot.available)
+
+    def test_reservation_occupies_table_for_duration(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ReservationStore(Path(tempdir.name) / "duration.sqlite3")
+        store.create_table(table_id="two-top", name="T1", capacity=2)
+        service = ReservationService(
+            store,
+            timezone_name="America/New_York",
+            open_time="17:00",
+            close_time="22:00",
+            slot_minutes=15,
+            slot_capacity=2,
+            default_duration_minutes=90,
+        )
+        first = service.create_reservation(
+            ReservationCreate(
+                guest_name="Leo Martin",
+                phone="5551119999",
+                party_size=2,
+                reservation_time="2026-06-12T19:00:00",
+                channel="online",
+            )
+        )
+
+        self.assertEqual(first.table_names, ("T1",))
+        with self.assertRaises(ReservationNotAvailableError):
+            service.create_reservation(
+                ReservationCreate(
+                    guest_name="Nia Patel",
+                    phone="5550001111",
+                    party_size=2,
+                    reservation_time="2026-06-12T20:15:00",
+                    channel="agent",
+                )
+            )
+
+        second = service.create_reservation(
+            ReservationCreate(
+                guest_name="Owen Kim",
+                phone="5550002222",
+                party_size=2,
+                reservation_time="2026-06-12T20:30:00",
+                channel="online",
+            )
+        )
+        self.assertEqual(second.table_names, ("T1",))
+
+    def test_combines_tables_for_larger_party(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ReservationStore(Path(tempdir.name) / "combine.sqlite3")
+        store.create_table(table_id="t1", name="T1", capacity=2, zone="Patio", can_combine=True)
+        store.create_table(table_id="t2", name="T2", capacity=2, zone="Patio", can_combine=True)
+        service = ReservationService(
+            store,
+            timezone_name="America/New_York",
+            open_time="17:00",
+            close_time="22:00",
+            slot_minutes=15,
+            slot_capacity=4,
+            default_duration_minutes=90,
+        )
+
+        record = service.create_reservation(
+            ReservationCreate(
+                guest_name="Uma Davis",
+                phone="5551212121",
+                party_size=4,
+                reservation_time="2026-06-12T18:00:00",
+                channel="online",
+            )
+        )
+
+        self.assertEqual(record.table_names, ("T1", "T2"))
+
+    def test_unassigned_legacy_reservation_blocks_overlapping_inventory(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ReservationStore(Path(tempdir.name) / "legacy.sqlite3")
+        store.create_table(table_id="t1", name="T1", capacity=2)
+        store.create(
+            guest_name="Legacy Guest",
+            phone="5554443333",
+            party_size=2,
+            reservation_time="2026-06-12T23:00:00Z",
+            duration_minutes=90,
+            ends_at="2026-06-13T00:30:00Z",
+            channel="online",
+        )
+        service = ReservationService(
+            store,
+            timezone_name="America/New_York",
+            open_time="17:00",
+            close_time="22:00",
+            slot_minutes=15,
+            slot_capacity=2,
+            default_duration_minutes=90,
+        )
+
+        with self.assertRaises(ReservationNotAvailableError):
+            service.create_reservation(
+                ReservationCreate(
+                    guest_name="New Guest",
+                    phone="5554442222",
+                    party_size=2,
+                    reservation_time="2026-06-12T19:30:00",
+                    channel="agent",
+                )
+            )
 
 
 if __name__ == "__main__":

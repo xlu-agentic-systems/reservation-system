@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from threading import Lock
 from zoneinfo import ZoneInfo
 
+from .inventory import TablePlanner
 from .storage import ReservationRecord, ReservationStore
 
 
@@ -30,6 +31,7 @@ class ReservationCreate:
     phone: str
     party_size: int
     reservation_time: str
+    duration_minutes: int | None = None
     channel: str = "online"
     notes: str = ""
     source_session_id: str | None = None
@@ -38,8 +40,11 @@ class ReservationCreate:
 @dataclass(frozen=True)
 class AvailabilitySlot:
     reservation_time: str
+    ends_at: str
     seats_remaining: int
     available: bool
+    table_ids: tuple[str, ...] = ()
+    table_names: tuple[str, ...] = ()
 
 
 class ReservationService:
@@ -52,13 +57,16 @@ class ReservationService:
         close_time: str,
         slot_minutes: int,
         slot_capacity: int,
+        default_duration_minutes: int = 90,
     ) -> None:
         self.store = store
+        self.store.seed_default_tables(slot_capacity)
         self.timezone = ZoneInfo(timezone_name)
         self.open_time = parse_time(open_time)
         self.close_time = parse_time(close_time)
         self.slot_minutes = slot_minutes
         self.slot_capacity = slot_capacity
+        self.default_duration_minutes = default_duration_minutes
         self._write_lock = Lock()
 
     def create_reservation(self, request: ReservationCreate) -> ReservationRecord:
@@ -70,23 +78,34 @@ class ReservationService:
             raise ReservationError("party_size must be greater than zero")
         if request.channel not in VALID_CHANNELS:
             raise ReservationError(f"channel must be one of {sorted(VALID_CHANNELS)}")
+        duration_minutes = request.duration_minutes or self.default_duration_minutes
+        if duration_minutes <= 0:
+            raise ReservationError("duration_minutes must be greater than zero")
 
         with self._write_lock:
             normalized_time = self.normalize_datetime(request.reservation_time)
             self.ensure_open(normalized_time)
-            seats_reserved = self.store.seats_reserved_for_slot(normalized_time)
-            if seats_reserved + request.party_size > self.slot_capacity:
-                seats_left = max(self.slot_capacity - seats_reserved, 0)
-                raise ReservationNotAvailableError(f"Only {seats_left} seats remain for that slot")
+            ends_at = to_utc_iso(parse_iso(normalized_time) + timedelta(minutes=duration_minutes))
+            planner = self.planner_for_window(start_time=normalized_time, end_time=ends_at)
+            plan = planner.best_plan(
+                party_size=request.party_size,
+                start_time=normalized_time,
+                end_time=ends_at,
+            )
+            if plan is None:
+                raise ReservationNotAvailableError("No table assignment is available for that party and time")
 
             return self.store.create(
                 guest_name=request.guest_name.strip(),
                 phone=request.phone.strip(),
                 party_size=request.party_size,
                 reservation_time=normalized_time,
+                duration_minutes=duration_minutes,
+                ends_at=ends_at,
                 channel=request.channel,
                 notes=request.notes.strip(),
                 source_session_id=request.source_session_id,
+                table_ids=plan.table_ids,
             )
 
     def list_reservations(self, target_date: date | None = None) -> list[ReservationRecord]:
@@ -113,16 +132,27 @@ class ReservationService:
         close = datetime.combine(target_date, self.close_time, self.timezone)
         while cursor < close:
             slot_time = to_utc_iso(cursor.astimezone(timezone.utc))
-            seats_left = max(self.slot_capacity - self.store.seats_reserved_for_slot(slot_time), 0)
+            ends_at = to_utc_iso(cursor.astimezone(timezone.utc) + timedelta(minutes=self.default_duration_minutes))
+            planner = self.planner_for_window(start_time=slot_time, end_time=ends_at)
+            plan = planner.best_plan(party_size=party_size, start_time=slot_time, end_time=ends_at)
             slots.append(
                 AvailabilitySlot(
                     reservation_time=slot_time,
-                    seats_remaining=seats_left,
-                    available=seats_left >= party_size,
+                    ends_at=ends_at,
+                    seats_remaining=planner.available_seats(start_time=slot_time, end_time=ends_at),
+                    available=plan is not None,
+                    table_ids=plan.table_ids if plan else (),
+                    table_names=plan.table_names if plan else (),
                 )
             )
             cursor += timedelta(minutes=self.slot_minutes)
         return slots
+
+    def planner_for_window(self, *, start_time: str, end_time: str) -> TablePlanner:
+        return TablePlanner(
+            self.store.list_tables(),
+            self.store.overlapping_reservations(start_time=start_time, end_time=end_time),
+        )
 
     def normalize_datetime(self, value: str) -> str:
         try:
@@ -157,3 +187,7 @@ def floor_to_slot(value: datetime, slot_minutes: int) -> datetime:
 
 def to_utc_iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
