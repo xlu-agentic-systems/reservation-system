@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
-from .reservations import ReservationCreate, ReservationError, ReservationService, record_to_dict
+from .reservations import ReservationCreate, ReservationError, ReservationNotAvailableError, ReservationService, record_to_dict
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """
@@ -23,6 +27,7 @@ class AgentIntent:
     phone: str | None = None
     party_size: int | None = None
     reservation_time: str | None = None
+    confirmation_code: str | None = None
     notes: str = ""
 
 
@@ -35,7 +40,11 @@ class DeterministicIntentParser:
     async def parse(self, utterance: str, *, today: date) -> AgentIntent:
         lower = utterance.lower()
         if "cancel" in lower:
-            return AgentIntent(action="cancel_reservation", phone=extract_phone(utterance))
+            return AgentIntent(
+                action="cancel_reservation",
+                phone=extract_phone(utterance),
+                confirmation_code=extract_confirmation_code(utterance),
+            )
         if "available" in lower or "availability" in lower or "open" in lower:
             return AgentIntent(
                 action="check_availability",
@@ -91,6 +100,7 @@ class OpenAIIntentParser:
                             "phone": {"type": ["string", "null"]},
                             "party_size": {"type": ["integer", "null"], "minimum": 1},
                             "reservation_time": {"type": ["string", "null"]},
+                            "confirmation_code": {"type": ["string", "null"]},
                             "notes": {"type": "string"},
                         },
                         "required": [
@@ -99,6 +109,7 @@ class OpenAIIntentParser:
                             "phone",
                             "party_size",
                             "reservation_time",
+                            "confirmation_code",
                             "notes",
                         ],
                     },
@@ -114,6 +125,7 @@ class ReservationCallAgent:
     def __init__(self, service: ReservationService, parser: IntentParser) -> None:
         self.service = service
         self.parser = parser
+        self.fallback_parser = DeterministicIntentParser()
 
     async def handle_turn(
         self,
@@ -123,56 +135,208 @@ class ReservationCallAgent:
         caller_phone: str | None = None,
         today: date | None = None,
     ) -> dict[str, Any]:
-        intent = await self.parser.parse(utterance, today=today or date.today())
-        phone = intent.phone or caller_phone
+        self.service.store.append_agent_turn(session_id=session_id, role="caller", text=utterance)
+        today_value = today or date.today()
+        existing_session = self.service.store.get_agent_session(session_id)
+        if existing_session and existing_session.state == "booked" and existing_session.reservation_id:
+            record = self.service.get_reservation(existing_session.reservation_id)
+            response = {
+                "action": "reservation_confirmed",
+                "state": "booked",
+                "message": (
+                    f"Confirmed for {record.guest_name}, party of {record.party_size}. "
+                    f"Confirmation code {record.confirmation_code}."
+                ),
+                "reservation": record_to_dict(record),
+            }
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
+        if existing_session and existing_session.state == "needs_host":
+            response = {
+                "action": "needs_host",
+                "state": "needs_host",
+                "message": "A host needs to take over this call. Please start a new call for a new booking.",
+            }
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
+
+        try:
+            intent = await self.parser.parse(utterance, today=today_value)
+        except Exception as exc:
+            logger.info("Primary intent parser failed; falling back to deterministic parser: %s", exc)
+            intent = await self.fallback_parser.parse(utterance, today=today_value)
+
+        if intent.action == "cancel_reservation" or is_cancellation(utterance):
+            response = self.cancellation_handoff(session_id, intent.confirmation_code or extract_confirmation_code(utterance))
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
+
+        if existing_session and existing_session.state == "ready_to_confirm" and is_affirmation(utterance):
+            response = self.book_confirmed_session(existing_session)
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
+
+        session = self.service.store.upsert_agent_session(
+            session_id=session_id,
+            caller_phone=caller_phone,
+            guest_name=intent.guest_name,
+            phone=intent.phone,
+            party_size=intent.party_size,
+            reservation_time=intent.reservation_time,
+            notes=intent.notes or None,
+        )
+        guest_name = intent.guest_name or session.guest_name
+        phone = intent.phone or caller_phone or session.phone or session.caller_phone
+        party_size = intent.party_size or session.party_size
+        reservation_time = intent.reservation_time or session.reservation_time
 
         if intent.action == "check_availability":
-            target_date = date.fromisoformat(intent.reservation_time[:10]) if intent.reservation_time else date.today()
-            slots = self.service.availability(target_date, party_size=intent.party_size or 1)
+            target_time = intent.reservation_time or session.reservation_time
+            target_date = date.fromisoformat(target_time[:10]) if target_time else date.today()
+            slots = self.service.availability(target_date, party_size=intent.party_size or session.party_size or 1)
             available_slots = [slot for slot in slots if slot.available][:5]
-            return {
+            response = {
                 "action": intent.action,
                 "message": "I found available times." if available_slots else "I do not see open times for that party size.",
                 "availability": [slot.__dict__ for slot in available_slots],
             }
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
 
-        if intent.action == "cancel_reservation":
-            return {
-                "action": intent.action,
-                "message": "I can help cancel that. Please provide the reservation confirmation ID.",
-            }
-
-        missing = missing_create_fields(intent, phone)
+        merged_intent = AgentIntent(
+            action=intent.action,
+            guest_name=guest_name,
+            phone=phone,
+            party_size=party_size,
+            reservation_time=reservation_time,
+            notes=session.notes or intent.notes,
+        )
+        missing = missing_create_fields(merged_intent, phone)
         if missing:
-            return {
+            self.service.store.upsert_agent_session(session_id=session_id, state="collecting")
+            response = {
                 "action": "collect_details",
+                "state": "collecting",
                 "missing": missing,
                 "message": f"I can book that. I still need: {', '.join(missing)}.",
             }
+            self.service.store.append_agent_turn(
+                session_id=session_id,
+                role="agent",
+                text=response["message"],
+                action=response["action"],
+            )
+            return response
 
+        response = {
+            "action": "confirm_details",
+            "state": "ready_to_confirm",
+            "message": (
+                f"I have {guest_name}, party of {party_size}, at {reservation_time}, "
+                f"phone ending {phone[-4:] if phone else ''}. Should I book it?"
+            ),
+            "proposed_reservation": {
+                "guest_name": guest_name,
+                "phone": phone,
+                "party_size": party_size,
+                "reservation_time": reservation_time,
+                "notes": session.notes or intent.notes,
+            },
+        }
+        self.service.store.upsert_agent_session(session_id=session_id, state="ready_to_confirm")
+        self.service.store.append_agent_turn(
+            session_id=session_id,
+            role="agent",
+            text=response["message"],
+            action=response["action"],
+        )
+        return response
+
+    def cancellation_handoff(self, session_id: str, confirmation_code: str | None) -> dict[str, Any]:
+        self.service.store.upsert_agent_session(session_id=session_id, state="needs_host")
+        return {
+            "action": "needs_host",
+            "state": "needs_host",
+            "message": (
+                f"I found cancellation intent for {confirmation_code}. A host should verify and cancel it."
+                if confirmation_code
+                else "A host should verify cancellation requests. Please provide the confirmation code."
+            ),
+            "confirmation_code": confirmation_code,
+        }
+
+    def book_confirmed_session(self, session) -> dict[str, Any]:
         try:
             record = self.service.create_reservation(
                 ReservationCreate(
-                    guest_name=intent.guest_name or "",
-                    phone=phone or "",
-                    party_size=intent.party_size or 0,
-                    reservation_time=intent.reservation_time or "",
+                    guest_name=session.guest_name or "",
+                    phone=session.phone or session.caller_phone or "",
+                    party_size=session.party_size or 0,
+                    reservation_time=session.reservation_time or "",
                     channel="agent",
-                    notes=intent.notes,
-                    source_session_id=session_id,
+                    notes=session.notes,
+                    source_session_id=session.session_id,
                 )
             )
+        except ReservationNotAvailableError as exc:
+            alternatives = self.alternatives(session.reservation_time, session.party_size or 1)
+            self.service.store.upsert_agent_session(session_id=session.session_id, state="collecting")
+            return {
+                "action": "reservation_unavailable",
+                "state": "collecting",
+                "message": str(exc),
+                "availability": alternatives,
+            }
         except ReservationError as exc:
             return {
                 "action": "reservation_failed",
                 "message": str(exc),
             }
-
+        self.service.store.upsert_agent_session(
+            session_id=session.session_id,
+            state="booked",
+            reservation_id=record.id,
+        )
         return {
             "action": "reservation_confirmed",
-            "message": f"Confirmed for {record.guest_name}, party of {record.party_size}.",
+            "state": "booked",
+            "message": (
+                f"Confirmed for {record.guest_name}, party of {record.party_size}. "
+                f"Confirmation code {record.confirmation_code}."
+            ),
             "reservation": record_to_dict(record),
         }
+
+    def alternatives(self, reservation_time: str | None, party_size: int) -> list[dict[str, Any]]:
+        if not reservation_time:
+            return []
+        target_date = date.fromisoformat(reservation_time[:10])
+        return [slot.__dict__ for slot in self.service.availability(target_date, party_size=party_size) if slot.available][:3]
 
 
 def missing_create_fields(intent: AgentIntent, phone: str | None) -> list[str]:
@@ -218,6 +382,22 @@ def extract_phone(utterance: str) -> str | None:
         if 10 <= digit_count <= 15:
             return candidate
     return None
+
+
+def extract_confirmation_code(utterance: str) -> str | None:
+    match = re.search(r"\b(?:confirmation|code|reservation)\s*(?:is|#|number|code)?\s*([A-Z0-9]{6,10})\b", utterance, re.I)
+    return match.group(1).upper() if match else None
+
+
+def is_affirmation(utterance: str) -> bool:
+    lower = utterance.lower()
+    if re.search(r"\b(don't|do not|no|cancel|stop|never)\b", lower):
+        return False
+    return bool(re.search(r"\b(yes|yeah|yep|please book|book it|confirm it|that works)\b", lower))
+
+
+def is_cancellation(utterance: str) -> bool:
+    return bool(re.search(r"\b(cancel|don't book|do not book|stop)\b", utterance.lower()))
 
 
 def extract_name(utterance: str) -> str | None:

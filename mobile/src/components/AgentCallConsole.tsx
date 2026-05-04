@@ -8,10 +8,11 @@ type Props = {
   response: CallAgentResponse | null;
   onUtteranceChange: (value: string) => void;
   onSend: () => void;
+  onNewCall: () => void;
   sending: boolean;
 };
 
-export function AgentCallConsole({ utterance, response, onUtteranceChange, onSend, sending }: Props) {
+export function AgentCallConsole({ utterance, response, onUtteranceChange, onSend, onNewCall, sending }: Props) {
   return (
     <View style={styles.section}>
       <View style={styles.headingRow}>
@@ -26,10 +27,15 @@ export function AgentCallConsole({ utterance, response, onUtteranceChange, onSen
         placeholderTextColor="#7b8b87"
         style={styles.textArea}
       />
-      <Pressable disabled={sending || !utterance.trim()} onPress={onSend} style={styles.sendButton}>
-        <Ionicons name="send-outline" size={18} color="#fff" />
-        <Text style={styles.sendText}>{sending ? "Sending" : "Send Turn"}</Text>
-      </Pressable>
+      <View style={styles.buttonRow}>
+        <Pressable disabled={sending || !utterance.trim()} onPress={onSend} style={styles.sendButton}>
+          <Ionicons name="send-outline" size={18} color="#fff" />
+          <Text style={styles.sendText}>{sending ? "Sending" : "Send Turn"}</Text>
+        </Pressable>
+        <Pressable onPress={onNewCall} style={styles.secondaryButton}>
+          <Ionicons name="refresh-outline" size={18} color="#1f2d2f" />
+        </Pressable>
+      </View>
       {response ? (
         <View style={styles.response}>
           <Text style={styles.responseAction}>{response.action}</Text>
@@ -74,6 +80,19 @@ const styles = StyleSheet.create({
     gap: 8,
     minHeight: 42,
     paddingHorizontal: 14
+  },
+  buttonRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
+  },
+  secondaryButton: {
+    alignItems: "center",
+    backgroundColor: "#e8efe8",
+    borderRadius: 8,
+    height: 42,
+    justifyContent: "center",
+    width: 42
   },
   sendText: {
     color: "#fff",

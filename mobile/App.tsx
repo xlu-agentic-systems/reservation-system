@@ -27,6 +27,7 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [utterance, setUtterance] = useState("");
   const [agentResponse, setAgentResponse] = useState<CallAgentResponse | null>(null);
+  const [agentSessionId, setAgentSessionId] = useState(() => makeSessionId());
   const [sendingTurn, setSendingTurn] = useState(false);
 
   async function refresh() {
@@ -73,7 +74,7 @@ export default function App() {
   async function handleSendTurn() {
     setSendingTurn(true);
     try {
-      const response = await sendCallTurn(utterance, "mobile-demo-session");
+      const response = await sendCallTurn(utterance, agentSessionId);
       setAgentResponse(response);
       if (response.reservation) {
         setUtterance("");
@@ -84,6 +85,12 @@ export default function App() {
     } finally {
       setSendingTurn(false);
     }
+  }
+
+  function handleNewCall() {
+    setAgentSessionId(makeSessionId());
+    setUtterance("");
+    setAgentResponse(null);
   }
 
   async function handleStatusChange(reservationId: string, status: Reservation["status"]) {
@@ -122,6 +129,7 @@ export default function App() {
           response={agentResponse}
           onUtteranceChange={setUtterance}
           onSend={handleSendTurn}
+          onNewCall={handleNewCall}
           sending={sendingTurn}
         />
         <ReservationList reservations={reservations} onStatusChange={handleStatusChange} />
@@ -155,3 +163,7 @@ const styles = StyleSheet.create({
     lineHeight: 21
   }
 });
+
+function makeSessionId(): string {
+  return `mobile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
