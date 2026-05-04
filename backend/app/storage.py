@@ -46,6 +46,21 @@ class RestaurantTableRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class AgentSessionRecord:
+    session_id: str
+    caller_phone: str | None
+    guest_name: str | None
+    phone: str | None
+    party_size: int | None
+    reservation_time: str | None
+    notes: str
+    state: str
+    reservation_id: str | None
+    created_at: str
+    updated_at: str
+
+
 class TableImportSpec(Protocol):
     id: str
     name: str
@@ -148,6 +163,37 @@ class ReservationStore:
                     PRIMARY KEY (reservation_id, table_id),
                     FOREIGN KEY (reservation_id) REFERENCES reservations(id),
                     FOREIGN KEY (table_id) REFERENCES restaurant_tables(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_call_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    caller_phone TEXT,
+                    guest_name TEXT,
+                    phone TEXT,
+                    party_size INTEGER,
+                    reservation_time TEXT,
+                    notes TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'collecting',
+                    reservation_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.ensure_column(connection, "agent_call_sessions", "state", "TEXT NOT NULL DEFAULT 'collecting'")
+            self.ensure_column(connection, "agent_call_sessions", "reservation_id", "TEXT")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_call_turns (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    action TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -511,6 +557,90 @@ class ReservationStore:
             )
         return self.get(reservation_id)
 
+    def get_agent_session(self, session_id: str) -> AgentSessionRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_call_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return to_agent_session_record(row) if row else None
+
+    def upsert_agent_session(
+        self,
+        *,
+        session_id: str,
+        caller_phone: str | None = None,
+        guest_name: str | None = None,
+        phone: str | None = None,
+        party_size: int | None = None,
+        reservation_time: str | None = None,
+        notes: str | None = None,
+        state: str | None = None,
+        reservation_id: str | None = None,
+    ) -> AgentSessionRecord:
+        existing = self.get_agent_session(session_id)
+        now = utc_now()
+        created_at = existing.created_at if existing else now
+        values = {
+            "caller_phone": caller_phone if caller_phone is not None else (existing.caller_phone if existing else None),
+            "guest_name": guest_name if guest_name is not None else (existing.guest_name if existing else None),
+            "phone": phone if phone is not None else (existing.phone if existing else None),
+            "party_size": party_size if party_size is not None else (existing.party_size if existing else None),
+            "reservation_time": (
+                reservation_time if reservation_time is not None else (existing.reservation_time if existing else None)
+            ),
+            "notes": notes if notes is not None else (existing.notes if existing else ""),
+            "state": state if state is not None else (existing.state if existing else "collecting"),
+            "reservation_id": reservation_id if reservation_id is not None else (existing.reservation_id if existing else None),
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_call_sessions (
+                    session_id, caller_phone, guest_name, phone, party_size,
+                    reservation_time, notes, state, reservation_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    caller_phone = excluded.caller_phone,
+                    guest_name = excluded.guest_name,
+                    phone = excluded.phone,
+                    party_size = excluded.party_size,
+                    reservation_time = excluded.reservation_time,
+                    notes = excluded.notes,
+                    state = excluded.state,
+                    reservation_id = excluded.reservation_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    values["caller_phone"],
+                    values["guest_name"],
+                    values["phone"],
+                    values["party_size"],
+                    values["reservation_time"],
+                    values["notes"],
+                    values["state"],
+                    values["reservation_id"],
+                    created_at,
+                    now,
+                ),
+            )
+        record = self.get_agent_session(session_id)
+        if record is None:
+            raise RuntimeError("Agent session was not persisted")
+        return record
+
+    def append_agent_turn(self, *, session_id: str, role: str, text: str, action: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_call_turns (id, session_id, role, text, action, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid4()), session_id, role, text, action, utc_now()),
+            )
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -551,6 +681,22 @@ def to_table_record(row: sqlite3.Row) -> RestaurantTableRecord:
         y=float(row["y"]),
         can_combine=bool(row["can_combine"]),
         is_active=bool(row["is_active"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def to_agent_session_record(row: sqlite3.Row) -> AgentSessionRecord:
+    return AgentSessionRecord(
+        session_id=row["session_id"],
+        caller_phone=row["caller_phone"],
+        guest_name=row["guest_name"],
+        phone=row["phone"],
+        party_size=int(row["party_size"]) if row["party_size"] is not None else None,
+        reservation_time=row["reservation_time"],
+        notes=row["notes"],
+        state=row["state"],
+        reservation_id=row["reservation_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
