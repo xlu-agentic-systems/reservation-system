@@ -45,6 +45,16 @@ export async function fetchReservations(date: string): Promise<Reservation[]> {
   return payload.reservations;
 }
 
+export async function updateReservationStatus(
+  reservationId: string,
+  status: Reservation["status"]
+): Promise<Reservation> {
+  return request<Reservation>(`/reservations/${reservationId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status })
+  });
+}
+
 export async function sendCallTurn(utterance: string, sessionId: string): Promise<CallAgentResponse> {
   return request<CallAgentResponse>("/agent/call-turn", {
     method: "POST",

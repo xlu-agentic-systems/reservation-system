@@ -15,6 +15,7 @@ from .reservations import (
     ReservationNotAvailableError,
     ReservationNotFoundError,
     ReservationService,
+    ReservationUpdate,
     record_to_dict,
 )
 from .storage import ReservationStore
@@ -61,6 +62,15 @@ class ReservationCreateBody(BaseModel):
 
 class ReservationStatusBody(BaseModel):
     status: str
+
+
+class ReservationUpdateBody(BaseModel):
+    guest_name: str | None = Field(default=None, min_length=1)
+    phone: str | None = Field(default=None, min_length=1)
+    party_size: int | None = Field(default=None, gt=0)
+    reservation_time: str | None = None
+    duration_minutes: int | None = Field(default=None, gt=0)
+    notes: str | None = None
 
 
 class TableSpecBody(BaseModel):
@@ -165,15 +175,52 @@ def create_reservation(body: ReservationCreateBody) -> dict[str, object]:
 
 
 @app.get("/reservations")
-def list_reservations(date_value: date | None = Query(default=None, alias="date")) -> dict[str, object]:
-    records = service.list_reservations(date_value)
+def list_reservations(
+    date_value: date | None = Query(default=None, alias="date"),
+    query: str | None = None,
+) -> dict[str, object]:
+    records = service.list_reservations(date_value, query=query)
     return {"reservations": [record_to_dict(record) for record in records]}
+
+
+@app.get("/reservations/{reservation_id}")
+def get_reservation(reservation_id: str) -> dict[str, object]:
+    try:
+        record = service.get_reservation(reservation_id)
+    except ReservationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return record_to_dict(record)
+
+
+@app.patch("/reservations/{reservation_id}")
+def update_reservation(reservation_id: str, body: ReservationUpdateBody) -> dict[str, object]:
+    try:
+        record = service.update_reservation(
+            reservation_id,
+            ReservationUpdate(
+                guest_name=body.guest_name,
+                phone=body.phone,
+                party_size=body.party_size,
+                reservation_time=body.reservation_time,
+                duration_minutes=body.duration_minutes,
+                notes=body.notes,
+            ),
+        )
+    except ReservationNotAvailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ReservationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ReservationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return record_to_dict(record)
 
 
 @app.patch("/reservations/{reservation_id}/status")
 def update_reservation_status(reservation_id: str, body: ReservationStatusBody) -> dict[str, object]:
     try:
         record = service.update_status(reservation_id, body.status)
+    except ReservationNotAvailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ReservationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ReservationError as exc:

@@ -1,12 +1,13 @@
 export type Reservation = {
   id: string;
+  confirmation_code: string;
   guest_name: string;
   phone: string;
   party_size: number;
   reservation_time: string;
   duration_minutes: number;
   ends_at: string;
-  channel: "online" | "phone" | "agent";
+  channel: "online" | "phone" | "agent" | "walk_in";
   status: "confirmed" | "cancelled" | "seated" | "no_show";
   notes: string;
   source_session_id?: string | null;
