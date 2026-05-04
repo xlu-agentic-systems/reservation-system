@@ -6,7 +6,13 @@ import { AgentCallConsole } from "./src/components/AgentCallConsole";
 import { AvailabilityStrip } from "./src/components/AvailabilityStrip";
 import { ReservationForm } from "./src/components/ReservationForm";
 import { ReservationList } from "./src/components/ReservationList";
-import { createReservation, fetchAvailability, fetchReservations, sendCallTurn } from "./src/api/client";
+import {
+  createReservation,
+  fetchAvailability,
+  fetchReservations,
+  sendCallTurn,
+  updateReservationStatus
+} from "./src/api/client";
 import { AvailabilitySlot, CallAgentResponse, Reservation } from "./src/types/reservation";
 
 export default function App() {
@@ -80,6 +86,15 @@ export default function App() {
     }
   }
 
+  async function handleStatusChange(reservationId: string, status: Reservation["status"]) {
+    try {
+      await updateReservationStatus(reservationId, status);
+      await refresh();
+    } catch (error) {
+      Alert.alert("Status update failed", error instanceof Error ? error.message : "Please try again.");
+    }
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
@@ -109,7 +124,7 @@ export default function App() {
           onSend={handleSendTurn}
           sending={sendingTurn}
         />
-        <ReservationList reservations={reservations} />
+        <ReservationList reservations={reservations} onStatusChange={handleStatusChange} />
       </ScrollView>
     </SafeAreaView>
   );

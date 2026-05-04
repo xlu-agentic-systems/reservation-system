@@ -1,13 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Reservation } from "../types/reservation";
 
 type Props = {
   reservations: Reservation[];
+  onStatusChange: (reservationId: string, status: Reservation["status"]) => void;
 };
 
-export function ReservationList({ reservations }: Props) {
+export function ReservationList({ reservations, onStatusChange }: Props) {
   return (
     <View style={styles.section}>
       <View style={styles.headingRow}>
@@ -26,7 +27,22 @@ export function ReservationList({ reservations }: Props) {
               </Text>
               <Text style={styles.table}>{reservation.table_names.join("+") || "Unassigned"}</Text>
             </View>
-            <Text style={styles.status}>{reservation.status}</Text>
+            <View style={styles.actions}>
+              <Text style={styles.status}>{reservation.status}</Text>
+              {reservation.status === "confirmed" ? (
+                <View style={styles.actionRow}>
+                  <Pressable onPress={() => onStatusChange(reservation.id, "seated")} style={styles.iconButton}>
+                    <Ionicons name="checkmark" size={16} color="#1f2d2f" />
+                  </Pressable>
+                  <Pressable onPress={() => onStatusChange(reservation.id, "no_show")} style={styles.iconButton}>
+                    <Ionicons name="close" size={16} color="#1f2d2f" />
+                  </Pressable>
+                  <Pressable onPress={() => onStatusChange(reservation.id, "cancelled")} style={styles.iconButton}>
+                    <Ionicons name="trash-outline" size={16} color="#1f2d2f" />
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
           </View>
         ))
       )}
@@ -57,7 +73,7 @@ const styles = StyleSheet.create({
     fontSize: 14
   },
   item: {
-    alignItems: "center",
+    alignItems: "flex-start",
     backgroundColor: "#fff",
     borderColor: "#d6ded8",
     borderRadius: 8,
@@ -65,6 +81,22 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     padding: 12
+  },
+  actions: {
+    alignItems: "flex-end",
+    gap: 8
+  },
+  actionRow: {
+    flexDirection: "row",
+    gap: 6
+  },
+  iconButton: {
+    alignItems: "center",
+    backgroundColor: "#e8efe8",
+    borderRadius: 8,
+    height: 32,
+    justifyContent: "center",
+    width: 32
   },
   name: {
     color: "#1f2d2f",

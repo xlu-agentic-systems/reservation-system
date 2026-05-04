@@ -5,7 +5,13 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from app.reservations import ReservationCreate, ReservationNotAvailableError, ReservationService
+from app.reservations import (
+    ReservationCreate,
+    ReservationError,
+    ReservationNotAvailableError,
+    ReservationService,
+    ReservationUpdate,
+)
 from app.storage import ReservationStore
 
 
@@ -68,6 +74,8 @@ class ReservationServiceTest(unittest.TestCase):
             )
         )
         self.service.update_status(record.id, "cancelled")
+        cancelled = self.service.get_reservation(record.id)
+        self.assertEqual(cancelled.table_names, ())
 
         replacement = self.service.create_reservation(
             ReservationCreate(
@@ -205,6 +213,129 @@ class ReservationServiceTest(unittest.TestCase):
                     channel="agent",
                 )
             )
+
+    def test_confirmation_code_lookup_and_query_search(self) -> None:
+        record = self.service.create_reservation(
+            ReservationCreate(
+                guest_name="Quinn Harper",
+                phone="5551012020",
+                party_size=2,
+                reservation_time="2026-06-12T18:00:00",
+                channel="online",
+            )
+        )
+
+        found = self.service.get_reservation(record.confirmation_code)
+        self.assertEqual(found.id, record.id)
+        search_results = self.service.list_reservations(query="harper")
+        self.assertEqual([item.id for item in search_results], [record.id])
+
+    def test_reschedule_reassigns_and_releases_old_time(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ReservationStore(Path(tempdir.name) / "reschedule.sqlite3")
+        store.create_table(table_id="two-top", name="T1", capacity=2)
+        service = ReservationService(
+            store,
+            timezone_name="America/New_York",
+            open_time="17:00",
+            close_time="22:00",
+            slot_minutes=15,
+            slot_capacity=2,
+            default_duration_minutes=90,
+        )
+        original = service.create_reservation(
+            ReservationCreate(
+                guest_name="Riley Moore",
+                phone="5553034040",
+                party_size=2,
+                reservation_time="2026-06-12T19:00:00",
+                channel="online",
+            )
+        )
+
+        updated = service.update_reservation(
+            original.id,
+            ReservationUpdate(reservation_time="2026-06-12T20:30:00"),
+        )
+
+        self.assertTrue(updated.reservation_time.endswith("00:30:00Z"))
+        replacement = service.create_reservation(
+            ReservationCreate(
+                guest_name="Sasha Nguyen",
+                phone="5555056060",
+                party_size=2,
+                reservation_time="2026-06-12T19:00:00",
+                channel="walk_in",
+            )
+        )
+        self.assertEqual(replacement.status, "confirmed")
+
+    def test_cancelled_reservation_cannot_be_reactivated(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ReservationStore(Path(tempdir.name) / "reactivate.sqlite3")
+        store.create_table(table_id="two-top", name="T1", capacity=2)
+        service = ReservationService(
+            store,
+            timezone_name="America/New_York",
+            open_time="17:00",
+            close_time="22:00",
+            slot_minutes=15,
+            slot_capacity=2,
+            default_duration_minutes=90,
+        )
+        cancelled = service.create_reservation(
+            ReservationCreate(
+                guest_name="Taylor Brooks",
+                phone="5557078080",
+                party_size=2,
+                reservation_time="2026-06-12T19:00:00",
+                channel="online",
+            )
+        )
+        service.update_status(cancelled.id, "cancelled")
+        service.create_reservation(
+            ReservationCreate(
+                guest_name="Uma Patel",
+                phone="5559091010",
+                party_size=2,
+                reservation_time="2026-06-12T19:00:00",
+                channel="online",
+            )
+        )
+
+        with self.assertRaises(ReservationError):
+            service.update_status(cancelled.id, "confirmed")
+
+    def test_update_rejects_turn_that_runs_past_close(self) -> None:
+        record = self.service.create_reservation(
+            ReservationCreate(
+                guest_name="Vera Hall",
+                phone="5551110000",
+                party_size=2,
+                reservation_time="2026-06-12T20:00:00",
+                channel="online",
+            )
+        )
+
+        with self.assertRaises(ReservationNotAvailableError):
+            self.service.update_reservation(record.id, ReservationUpdate(duration_minutes=180))
+
+    def test_terminal_reservation_cannot_be_edited(self) -> None:
+        record = self.service.create_reservation(
+            ReservationCreate(
+                guest_name="Willa Price",
+                phone="5552220000",
+                party_size=2,
+                reservation_time="2026-06-12T18:00:00",
+                channel="online",
+            )
+        )
+        self.service.update_status(record.id, "no_show")
+
+        with self.assertRaises(ReservationError):
+            self.service.update_reservation(record.id, ReservationUpdate(notes="late arrival"))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ ACTIVE_STATUSES = {"confirmed", "seated"}
 @dataclass(frozen=True)
 class ReservationRecord:
     id: str
+    confirmation_code: str
     guest_name: str
     phone: str
     party_size: int
@@ -78,6 +79,7 @@ class ReservationStore:
                 """
                 CREATE TABLE IF NOT EXISTS reservations (
                     id TEXT PRIMARY KEY,
+                    confirmation_code TEXT NOT NULL DEFAULT '',
                     guest_name TEXT NOT NULL,
                     phone TEXT NOT NULL,
                     party_size INTEGER NOT NULL CHECK (party_size > 0),
@@ -91,6 +93,20 @@ class ReservationStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
+                """
+            )
+            self.ensure_column(connection, "reservations", "confirmation_code", "TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                """
+                UPDATE reservations
+                SET confirmation_code = upper(substr(hex(randomblob(4)), 1, 8))
+                WHERE confirmation_code = ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reservations_confirmation_code
+                ON reservations (confirmation_code)
                 """
             )
             self.ensure_column(connection, "reservations", "duration_minutes", "INTEGER NOT NULL DEFAULT 90")
@@ -289,13 +305,14 @@ class ReservationStore:
             connection.execute(
                 """
                 INSERT INTO reservations (
-                    id, guest_name, phone, party_size, reservation_time, duration_minutes, ends_at, channel,
+                    id, confirmation_code, guest_name, phone, party_size, reservation_time, duration_minutes, ends_at, channel,
                     status, notes, source_session_id, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
+                    confirmation_code(),
                     guest_name,
                     phone,
                     party_size,
@@ -330,6 +347,14 @@ class ReservationStore:
             ).fetchone()
         return to_record(row, self.table_assignments_for_reservation(reservation_id)) if row else None
 
+    def get_by_confirmation_code(self, confirmation_code_value: str) -> ReservationRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM reservations WHERE confirmation_code = ?",
+                (confirmation_code_value.strip().upper(),),
+            ).fetchone()
+        return to_record(row, self.table_assignments_for_reservation(row["id"])) if row else None
+
     def list(
         self,
         *,
@@ -357,7 +382,13 @@ class ReservationStore:
             ).fetchall()
         return [to_record(row, self.table_assignments_for_reservation(row["id"])) for row in rows]
 
-    def overlapping_reservations(self, *, start_time: str, end_time: str) -> list[ReservationRecord]:
+    def overlapping_reservations(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        exclude_reservation_id: str | None = None,
+    ) -> list[ReservationRecord]:
         placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
         with self.connect() as connection:
             rows = connection.execute(
@@ -367,9 +398,10 @@ class ReservationStore:
                 WHERE reservation_time < ?
                 AND ends_at > ?
                 AND status IN ({placeholders})
+                AND (? IS NULL OR id != ?)
                 ORDER BY reservation_time
                 """,
-                [end_time, start_time, *sorted(ACTIVE_STATUSES)],
+                [end_time, start_time, *sorted(ACTIVE_STATUSES), exclude_reservation_id, exclude_reservation_id],
             ).fetchall()
         return [to_record(row, self.table_assignments_for_reservation(row["id"])) for row in rows]
 
@@ -386,6 +418,72 @@ class ReservationStore:
                 (reservation_id,),
             ).fetchall()
         return tuple((row["id"], row["name"]) for row in rows)
+
+    def replace_table_assignments(self, reservation_id: str, table_ids: tuple[str, ...]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM reservation_table_assignments WHERE reservation_id = ?",
+                (reservation_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO reservation_table_assignments (reservation_id, table_id)
+                VALUES (?, ?)
+                """,
+                [(reservation_id, table_id) for table_id in table_ids],
+            )
+
+    def update_details(
+        self,
+        *,
+        reservation_id: str,
+        guest_name: str,
+        phone: str,
+        party_size: int,
+        reservation_time: str,
+        duration_minutes: int,
+        ends_at: str,
+        notes: str,
+        table_ids: tuple[str, ...],
+    ) -> ReservationRecord | None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE reservations
+                SET guest_name = ?,
+                    phone = ?,
+                    party_size = ?,
+                    reservation_time = ?,
+                    duration_minutes = ?,
+                    ends_at = ?,
+                    notes = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    guest_name,
+                    phone,
+                    party_size,
+                    reservation_time,
+                    duration_minutes,
+                    ends_at,
+                    notes,
+                    utc_now(),
+                    reservation_id,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM reservation_table_assignments WHERE reservation_id = ?",
+                (reservation_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO reservation_table_assignments (reservation_id, table_id)
+                VALUES (?, ?)
+                """,
+                [(reservation_id, table_id) for table_id in table_ids],
+            )
+        return self.get(reservation_id)
 
     def seats_reserved_for_slot(self, reservation_time: str) -> int:
         placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
@@ -418,9 +516,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def confirmation_code() -> str:
+    return uuid4().hex[:8].upper()
+
+
 def to_record(row: sqlite3.Row, table_assignments: tuple[tuple[str, str], ...] = ()) -> ReservationRecord:
     return ReservationRecord(
         id=row["id"],
+        confirmation_code=row["confirmation_code"],
         guest_name=row["guest_name"],
         phone=row["phone"],
         party_size=int(row["party_size"]),
